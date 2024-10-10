@@ -28,6 +28,7 @@ abstract contract CampaignBase is ICampaign {
     struct Campaign {
         uint256 id;
         uint256 amountRaised;
+        uint256 amountWithdrawn;
         uint256 deadline;
         uint256 refundDeadline;
         uint256 goal; // in wei
@@ -40,6 +41,10 @@ abstract contract CampaignBase is ICampaign {
         address[] donorAddresses;
         mapping(address => bool) hasClaimedTokens;
         uint256 tokensAllocated;
+        mapping(uint8 => Milestone) milestones;
+        uint8 totalMilestones;
+        uint8 currentMilestone;
+        uint8 nextWithdrawableMilestone;
     }
 
     /// @notice Array of all campaigns
@@ -93,11 +98,12 @@ abstract contract CampaignBase is ICampaign {
         string memory title,
         string memory description,
         string memory coverImage,
+        BasicMilestone[] memory milestones,
         uint256 goal,
         uint64 duration,
         uint256 refundDeadline
     ) public override {
-        _validateCampaignCreation(title, description, coverImage, goal, duration, refundDeadline);
+        _validateCampaignCreation(title, description, coverImage, milestones, goal, duration, refundDeadline);
 
         uint256 deadline = block.timestamp + (duration * ONE_DAY);
         uint256 campaignId = campaigns.length;
@@ -112,6 +118,22 @@ abstract contract CampaignBase is ICampaign {
         newCampaign.description = description;
         newCampaign.coverImage = coverImage;
 
+        uint8 totalMilestones = uint8(milestones.length);
+
+        if (totalMilestones > 0) {
+            for (uint8 i = 0; i < totalMilestones; i++) {
+                Milestone memory _milestone = Milestone({
+                    id: i,
+                    targetAmount: milestones[i].targetAmount,
+                    deadline: milestones[i].deadline,
+                    description: milestones[i].description,
+                    status: MilestoneStatus.Pending
+                });
+                newCampaign.milestones[i] = _milestone;
+            }
+        }
+        newCampaign.totalMilestones = totalMilestones;
+
         campaignsOwner[msg.sender].push(campaignId);
     }
 
@@ -125,6 +147,24 @@ abstract contract CampaignBase is ICampaign {
     {
         Campaign storage campaign = campaigns[campaignId];
         return _createCampaignDetails(campaign);
+    }
+
+    /// @inheritdoc ICampaign
+    function getCampaignMileStones(uint256 campaignId)
+        public
+        view
+        override
+        campaignExists(campaignId)
+        returns (Milestone[] memory milestones, uint8 currentMileStone)
+    {
+        Campaign storage campaign = campaigns[campaignId];
+        milestones = new ICampaign.Milestone[](campaign.totalMilestones);
+
+        for (uint8 index = 0; index < campaign.totalMilestones; index++) {
+            milestones[index] = campaign.milestones[index];
+        }
+
+        return (milestones, campaign.currentMilestone);
     }
 
     /// @inheritdoc ICampaign
@@ -177,26 +217,12 @@ abstract contract CampaignBase is ICampaign {
 
         if (campaign.claimed) revert Campaign__CampaignAlreadyClaimed();
         if (msg.sender != campaign.owner) revert Campaign__NotCampaignOwner();
-        if (block.timestamp < campaign.refundDeadline) {
-            revert Campaign__RefundDeadlineActive();
+
+        if (campaign.totalMilestones == 0) {
+            _withdrawCampaignFundWithNoMilestone(campaign);
+        } else {
+            _withdrawCampaignFundWithMilestone(campaign);
         }
-        if (campaign.amountRaised == 0) revert Campaign__EmptyDonation();
-
-        campaign.claimed = true;
-        uint256 fee = (campaign.amountRaised * OWNER_FEE) / 1000;
-
-        uint256 amount = campaign.amountRaised - fee;
-
-        accumulatedFee += fee;
-
-        if (amount > MINIMUM_AMOUNT_RAISED) {
-            campaign.tokensAllocated = (amount / MINIMUM_AMOUNT_RAISED) * 10 ** uint256(crowdchainToken.decimals());
-        }
-
-        (bool success,) = payable(msg.sender).call{value: amount}("");
-        if (!success) revert Campaign__WithdrawalFailed();
-
-        emit CampaignFundWithdrawn(campaignId, msg.sender, amount);
     }
 
     /// @inheritdoc ICampaign
@@ -254,6 +280,7 @@ abstract contract CampaignBase is ICampaign {
         string memory title,
         string memory description,
         string memory coverImage,
+        BasicMilestone[] memory milestones,
         uint256 goal,
         uint64 duration,
         uint256 refundDeadline
@@ -279,6 +306,30 @@ abstract contract CampaignBase is ICampaign {
         if (refundDeadline < 5) {
             revert Campaign__CampaignCreationFailed("Refund deadline must be at least 5 days after deadline");
         }
+
+        uint256 totalMilestones = milestones.length;
+        if (totalMilestones > 0) {
+            if(totalMilestones > 4) revert Campaign__CampaignCreationFailed("You can only have maximum of 4 milestones");
+            if(milestones[totalMilestones - 1].targetAmount != goal) revert Campaign__CampaignCreationFailed("Last milestone target amount must be equal to campaign goal");
+
+            uint256 deadlines = 0;
+            for (uint256 index = 0; index < totalMilestones; index++) {
+                if(index == (totalMilestones - 1)) {
+                    deadlines += milestones[index].deadline;
+                    break;
+                } else if (milestones[index].targetAmount > milestones[index + 1].targetAmount){
+                    revert Campaign__CampaignCreationFailed("Target amount of previous milestone must be less than the next one");
+                }
+
+                deadlines += milestones[index].deadline;
+            }
+
+            if (deadlines >= duration) {
+                revert Campaign__CampaignCreationFailed(
+                    "Total milestones deadline must be less than campign duration by at least 1 day"
+                );
+            }
+        }
     }
 
     /// @notice Creates a CampaignDetails struct from a Campaign struct
@@ -300,5 +351,62 @@ abstract contract CampaignBase is ICampaign {
             totalDonors: campaign.donorAddresses.length,
             tokensAllocated: campaign.tokensAllocated
         });
+    }
+
+    function _withdrawCampaignFundWithNoMilestone(Campaign storage campaign) internal {
+        if (block.timestamp < campaign.refundDeadline) {
+            revert Campaign__RefundDeadlineActive();
+        }
+        if (campaign.amountRaised == 0) revert Campaign__EmptyDonation();
+
+        campaign.claimed = true;
+        uint256 fee = (campaign.amountRaised * OWNER_FEE) / 1000;
+
+        uint256 amount = campaign.amountRaised - fee;
+
+        accumulatedFee += fee;
+
+        if (amount > MINIMUM_AMOUNT_RAISED) {
+            campaign.tokensAllocated = (amount / MINIMUM_AMOUNT_RAISED) * 10 ** uint256(crowdchainToken.decimals());
+        }
+
+        (bool success,) = payable(msg.sender).call{value: amount}("");
+        if (!success) revert Campaign__WithdrawalFailed();
+
+        emit CampaignFundWithdrawn(campaign.id, msg.sender, amount);
+    }
+
+    function _withdrawCampaignFundWithMilestone(Campaign storage campaign) internal {
+        Milestone storage milestone = campaign.milestones[campaign.nextWithdrawableMilestone];
+        if (milestone.status != MilestoneStatus.Completed) revert Campaign__MilestoneGoalNotCompeleted(campaign.id, campaign.nextWithdrawableMilestone, campaign.amountRaised);
+
+        uint256 amountToWithdraw = campaign.nextWithdrawableMilestone == campaign.totalMilestones - 1 ? campaign.amountRaised - campaign.amountWithdrawn : milestone.targetAmount - campaign.amountWithdrawn;
+        uint256 fee = 0;
+        uint256 amoutToSend = 0;
+
+        // TODO: During donation, you might want to check if amountRaised + fee is greater than first milestone target before moving to the next.
+        if (campaign.nextWithdrawableMilestone == 0) {
+            // deduct fee from the goal amount as some campign might stop and request for emergency refund before completing the total milestone. This is a loss on our part as far as fee is concerned.
+            fee = (campaign.goal * OWNER_FEE) / 1000;
+            amoutToSend = amountToWithdraw - fee;
+
+            accumulatedFee += fee;
+        } else {
+            amoutToSend = amountToWithdraw;
+        }
+
+        milestone.status = MilestoneStatus.Approved;
+        campaign.amountWithdrawn += amountToWithdraw;
+
+        if (campaign.nextWithdrawableMilestone == campaign.totalMilestones - 1) {
+            campaign.claimed = true;
+        } else {
+            campaign.nextWithdrawableMilestone += 1;
+        }
+
+        (bool success,) = payable(msg.sender).call{value: amoutToSend}("");
+        if (!success) revert Campaign__WithdrawalFailed();
+
+        emit CampaignFundWithdrawn(campaign.id, msg.sender, amoutToSend);
     }
 }

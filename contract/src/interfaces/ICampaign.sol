@@ -5,6 +5,30 @@ pragma solidity ^0.8.26;
 /// @author Olaleye Blessing
 /// @notice Interface for the core functionality of a crowdfunding campaign system
 interface ICampaign {
+    enum MilestoneStatus {
+        Pending, // Milestone is yet to be started
+        InProgress, // Milestone is currently being worked on
+        Completed, // Milestone has been completed
+        Approved, // Milestone has been approved by the campaign owner or stakeholders
+        Rejected // Milestone was rejected
+
+    }
+
+    /// @dev Struct containing details of a milestone
+    struct Milestone {
+        uint8 id;
+        uint256 targetAmount;
+        uint256 deadline;
+        string description;
+        MilestoneStatus status;
+    }
+
+    struct BasicMilestone {
+        uint256 targetAmount;
+        uint256 deadline;
+        string description;
+    }
+
     /// @notice Struct containing details of a campaign
     struct CampaignDetails {
         uint256 id;
@@ -21,6 +45,18 @@ interface ICampaign {
         uint256 tokensAllocated;
     }
 
+    /// @notice Emitted when a campaign reached a milestone
+    /// @dev The next milestone, if available, is started immediately the current one ends
+    /// @param campaignId The id of the campaign
+    /// @param milestoneId The id of the completed milestone
+    /// @param amountRaised The amount raised for the milestone
+    event MilestoneReached(uint256 indexed campaignId, uint8 milestoneId, uint256 amountRaised);
+
+    /// @notice Emitted when a new campaign's milestone just started.
+    /// @param campaignId The id of the campaign
+    /// @param milestoneId The id of the completed milestone
+    event NextMilestoneStarted(uint256 indexed campaignId, uint8 milestoneId);
+
     /// @notice Emitted when campaign funds are withdrawn by the owner
     /// @param campaignId The ID of the campaign
     /// @param owner The address of the campaign owner
@@ -32,6 +68,8 @@ interface ICampaign {
     /// @param campaignId The ID of the campaign
     /// @param amountRaised The total amount raised by the campaign
     event CampaignGoalCompleted(address indexed owner, uint256 indexed campaignId, uint256 amountRaised);
+
+    error Campaign__MilestoneGoalNotCompeleted(uint256 campaignId, uint8 milestoneId, uint256 amountRaised);
 
     /// @notice Error thrown when the account performing an operation is not the contract's owner
     error Campaign__NotContractOwner(address account);
@@ -92,6 +130,7 @@ interface ICampaign {
         string memory title,
         string memory description,
         string memory coverImage,
+        BasicMilestone[] memory milestones,
         uint256 goal,
         uint64 duration,
         uint256 refundDeadline
@@ -101,6 +140,15 @@ interface ICampaign {
     /// @param campaignId The ID of the campaign to retrieve
     /// @return The CampaignDetails struct containing the campaign's information
     function getCampaign(uint256 campaignId) external view returns (CampaignDetails memory);
+
+    /// @notice Retrieves the milestones of a campaign if it has any
+    /// @param campaignId The ID of the campaign milestones to retrieve
+    /// @return milestones An array of milestones for the specified campaign
+    /// @return currentMileStone The ID of the current milestone or 0 if no milestones are defined
+    function getCampaignMileStones(uint256 campaignId)
+        external
+        view
+        returns (Milestone[] memory milestones, uint8 currentMileStone);
 
     /// @notice Retrieves a paginated list of all campaigns
     /// @param page The page number to retrieve

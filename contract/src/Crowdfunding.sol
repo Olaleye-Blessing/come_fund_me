@@ -72,8 +72,25 @@ contract Crowdfunding is CampaignBase {
 
         emit NewDonation(msg.sender, campaignId, msg.value);
 
-        if (campaign.amountRaised >= campaign.goal) {
-            emit CampaignGoalCompleted(campaign.owner, campaignId, campaign.amountRaised);
+        if(campaign.totalMilestones > 0) {
+            Milestone storage currentMilestone = campaign.milestones[campaign.currentMilestone];
+
+            if(campaign.amountRaised >= currentMilestone.targetAmount) {
+                currentMilestone.status = MilestoneStatus.Completed;
+
+                if(currentMilestone.id == campaign.totalMilestones - 1) {
+                    emit CampaignGoalCompleted(campaign.owner, campaignId, campaign.amountRaised);
+                } else {
+                    emit MilestoneReached(campaignId, campaign.currentMilestone, campaign.amountRaised);
+                    campaign.currentMilestone++;
+                    campaign.milestones[campaign.currentMilestone].status = MilestoneStatus.InProgress;
+                    emit NextMilestoneStarted(campaignId, campaign.currentMilestone);
+                }
+            }
+        } else {
+            if (campaign.amountRaised >= campaign.goal) {
+                emit CampaignGoalCompleted(campaign.owner, campaignId, campaign.amountRaised);
+            }
         }
     }
 
